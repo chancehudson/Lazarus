@@ -1,6 +1,20 @@
 use profiler_macro::time_profiler;
 use rand::Rng;
 
+use scalarff::FieldElement;
+use ring_math::PolynomialRingElement;
+use ring_math::Polynomial;
+use ring_math::Vector;
+use ring_math::Matrix2D;
+
+scalarff::scalar_ring!(ScalarRing, 2147483647, "mersenne 31 bit, 2^31-1");
+ring_math::polynomial_ring!(PolynomialRing, ScalarRing, {
+    // we'll define the modulus as x^32 + 1
+    let mut p = Polynomial::new(vec![ScalarRing::from(1)]);
+    p.term(&ScalarRing::from(1), 32);
+    p
+}, "");
+
 pub fn setup() {
     // 0. setup
     // public parameters after setup: [a_ij^(k), a_ij^(l), phi^(k), phi^(l), b^(k), b0(l)']
@@ -86,74 +100,30 @@ pub fn prove() {
     // Send z, t_i, g_ij, h_ij to verifier
 }
 
-// Assuming you have a PolynomialRing type defined
-#[derive(Debug, Clone)]
-struct PolynomialRing {
-    coefficients: Vec<usize>, // Example field, adjust as necessary
-}
-
-impl PolynomialRing {
-    // Add this method to enable multiplication by PolynomialRing
-    fn multiply_by_polynomial_ring(&self, other: &PolynomialRing) -> PolynomialRing {
-        let mut result_coefficients =
-            vec![0; self.coefficients.len() + other.coefficients.len() - 1];
-        for (i, &coeff1) in self.coefficients.iter().enumerate() {
-            for (j, &coeff2) in other.coefficients.iter().enumerate() {
-                result_coefficients[i + j] += coeff1 * coeff2;
-            }
-        }
-        PolynomialRing {
-            coefficients: result_coefficients,
-        }
-    }
-
-    fn add_polynomial_ring(&self, other: &PolynomialRing) -> PolynomialRing {
-        let max_len = std::cmp::max(self.coefficients.len(), other.coefficients.len());
-        let mut result_coefficients = Vec::with_capacity(max_len);
-        for i in 0..max_len {
-            let a = if i < self.coefficients.len() {
-                self.coefficients[i]
-            } else {
-                0
-            };
-            let b = if i < other.coefficients.len() {
-                other.coefficients[i]
-            } else {
-                0
-            };
-            result_coefficients.push(a + b);
-        }
-        PolynomialRing {
-            coefficients: result_coefficients,
-        }
-    }
-}
-
 // inner product of 2 vectors of PolynomialRing
 // Start of Selection
 fn inner_product_polynomial_ring(
-    a: &Vec<PolynomialRing>,
-    b: &Vec<PolynomialRing>,
+    a: &Vector<PolynomialRing>,
+    b: &Vector<PolynomialRing>,
 ) -> PolynomialRing {
     a.iter()
         .zip(b.iter())
-        .map(|(a, b)| a.multiply_by_polynomial_ring(b))
+        .map(|(a, b)| a.clone() * b.clone())
         .collect::<Vec<PolynomialRing>>()
         .into_iter()
-        .reduce(|acc, x| acc.add_polynomial_ring(&x))
+        .reduce(|acc, x| acc + x)
         .unwrap()
 }
 
 // Function to calculate b^(k)
 fn calculate_b_constraint(
-    s: &Vec<Vec<PolynomialRing>>,
-    a: &Vec<Vec<usize>>,
+    s: &Matrix2D<PolynomialRing>,
+    a: &Matrix2D<ScalarRing>,
     phi: &Vec<usize>,
 ) -> PolynomialRing {
-    let mut b: PolynomialRing = PolynomialRing {
-        coefficients: vec![0],
-    };
-    let s_len = s.len();
+    let mut b: PolynomialRing = PolynomialRing::zero();
+    // let s_len = s.len();
+    let (rows, cols) = s.dimensions;
     // Calculate b^(k)
     for i in 0..s_len {
         for j in 0..s_len {
@@ -182,41 +152,9 @@ fn calculate_b_constraint(
     b
 }
 
-#[derive(Debug)]
-struct RqMatrix {
-    values: Vec<Vec<PolynomialRing>>, // matrix of PolynomialRing values
-}
-
-impl RqMatrix {
-    fn new(size_kappa: usize, size_n: usize) -> Self {
-        let mut rng = rand::thread_rng();
-        let values = (0..size_kappa)
-            .map(|_| {
-                (0..size_n)
-                    .map(|_| PolynomialRing {
-                        coefficients: (0..size_n).map(|_| rng.gen_range(1..10)).collect(),
-                    })
-                    .collect()
-            })
-            .collect();
-        RqMatrix { values }
-    }
-}
-
 // Ajtai commitment: calculate A matrix times s_i
-fn calculate_a_times_s_i(a: &RqMatrix, s_i: &Vec<PolynomialRing>) -> Vec<PolynomialRing> {
-    a.values
-        .iter()
-        .map(|row| {
-            row.iter()
-                .zip(s_i.iter())
-                .map(|(a, b)| a.multiply_by_polynomial_ring(b))
-                .collect::<Vec<PolynomialRing>>()
-        })
-        .collect::<Vec<Vec<PolynomialRing>>>()
-        .into_iter()
-        .flatten()
-        .collect::<Vec<PolynomialRing>>()
+fn calculate_a_times_s_i(a: &Matrix2D<PolynomialRing>, s_i: &Vector<PolynomialRing>) -> Vector<PolynomialRing> {
+    a.clone() * s_i.clone()
 }
 
 // convert number to basis
@@ -228,9 +166,9 @@ fn calculate_a_times_s_i(a: &RqMatrix, s_i: &Vec<PolynomialRing>) -> Vec<Polynom
 // fifth digit: 2 / 2 = 1, result_i = 0
 // sixth digit: 1 / 2 = 0, result_i = 1
 
-fn num_to_basis(num: usize, basis: usize, digits: usize) -> Vec<usize> {
+fn num_to_basis(num: ScalarRing, basis: usize, digits: usize) -> Vec<usize> {
     let mut result = Vec::new();
-    let mut remainder = num;
+    let mut remainder = num.0 as usize;
 
     while remainder > 0 {
         result.push(remainder % basis);
@@ -247,7 +185,7 @@ fn num_to_basis(num: usize, basis: usize, digits: usize) -> Vec<usize> {
 
 // convert ring polynomial to basis
 fn ring_polynomial_to_basis(poly: &PolynomialRing, basis: usize, digits: usize) -> Vec<Vec<usize>> {
-    poly.coefficients
+    poly.coef()
         .iter()
         .map(|coeff| num_to_basis(*coeff, basis, digits))
         .collect()
@@ -281,28 +219,37 @@ mod tests {
     #[test]
     fn test_setup_prover() {
         let lambda: usize = 128;
-        let q = 2usize.pow(32 as u32);
-        let d = 3; // todo: should be 64
+        // let q = 2usize.pow(32 as u32);
+        let q = ScalarRing::prime().to_u32_digits()[0];
+        let d = PolynomialRing::modulus().degree();
         // s is a vector of size r. each s_i is a PolynomialRing(Rq) with n coefficients
         let s_len: usize = 3; // r: Number of witness elements
         let size_n: usize = 5; // n
         let beta: usize = 50; // Example value for beta
-        let s: Vec<Vec<PolynomialRing>> = (1..=s_len)
+        // TODO: better/easier instantiation of a matrix with initial values
+        // make it more clear what will be rows and what will be columns
+        // how `values` is structured is unclear, and should be abstracted with methods
+        let s: Matrix2D<PolynomialRing> = Matrix2D {
+            dimensions: (s_len, size_n),
+            values:
+            (1..=s_len)
             .map(|i| {
                 (1..=size_n)
-                    .map(|j| PolynomialRing {
-                        coefficients: vec![i * 3 + j, i * 3 + j + 1, i * 3 + j + 2],
-                    })
+                    .map(|j| PolynomialRing::from(Polynomial::new(
+                        vec![i * 3 + j, i * 3 + j + 1, i * 3 + j + 2].iter().map(|v| ScalarRing::from(*v as u64)).collect::<Vec<_>>())
+                    ))
                     .collect()
             })
-            .collect();
-        println!("s: {:?}", s);
+            .flatten()
+            .collect()
+        };
+        println!("s: {:?}", s.values);
         // Calculate the sum of squared norms
-        let mut sum_squared_norms = 0;
+        let mut sum_squared_norms = scalarff::BigUint::from(0u64);
         for vector in &s {
             let norm_squared: usize = vector
                 .iter()
-                .map(|elem| elem.coefficients[0].pow(2)) // Calculate the square of each element
+                .map(|elem| elem.coef()[0].pow(2)) // Calculate the square of each element
                 .sum();
             sum_squared_norms += norm_squared; // Accumulate the squared norms
         }
